@@ -1,0 +1,9 @@
+# 배치 파일은 Windows 줄바꿈 유지, 나머지는 LF
+*.bat text eol=crlf
+*.sh  text eol=lf
+*.py  text eol=lf diff=python
+*.md  text eol=lf
+*.yaml text eol=lf
+
+# 업데이트 기록은 여러 PC 에서 동시에 추가돼도 충돌 없이 합치기
+docs/업데이트기록.md merge=union

@@ -1,0 +1,31 @@
+# ── 비밀 정보 (절대 커밋 금지) ──
+00_DOCUMENT/git_token.txt
+*token*.txt
+user_data/
+
+# ── 대용량 / 로컬 산출물 ──
+models/
+output/
+configs/
+_backup/
+_release/
+*.safetensors
+*.ckpt
+*.pt
+
+# ── 파이썬 ──
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# ── OS / 에디터 ──
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ── 업데이트 패키지 임시 폴더 ──
+_update_*/

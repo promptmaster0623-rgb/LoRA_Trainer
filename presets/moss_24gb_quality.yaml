@@ -1,0 +1,84 @@
+version: 1
+project:
+  name: moss_hq
+  output_dir: output
+  models_dir: models
+  cache_dir: ''
+  hf_token: ''
+model:
+  arch: moss_image
+  transformer_path: ''
+  text_encoder_path: ''
+  tokenizer_path: ''
+  vae_path: ''
+  dtype: bf16
+  transformer_quant: none
+  text_encoder_quant: none
+  block_swap: -1
+  gradient_checkpointing: true
+  attention: sdpa
+dataset:
+  folders: []
+  resolutions:
+  - 1024
+  trigger_word: ''
+  trigger_position: prefix
+  default_caption: ''
+  caption_dropout: 0.05
+  flip_horizontal: false
+  bucket_min: 512
+  bucket_max: 2048
+  bucket_step: 64
+  num_workers: 0
+network:
+  rank: 32
+  alpha: 32
+  dropout: 0.0
+  rank_dropout: 0.0
+  target: attn_mlp
+  include_regex: ''
+  exclude_regex: ''
+  rs_lora: false
+  init_weights: ''
+train:
+  max_steps: 2500
+  batch_size: 1
+  grad_accum: 1
+  learning_rate: 0.0001
+  optimizer: adamw
+  weight_decay: 0.01
+  betas:
+  - 0.9
+  - 0.999
+  eps: 1.0e-08
+  lr_scheduler: constant
+  warmup_steps: 0
+  max_grad_norm: 1.0
+  loss: mse
+  huber_delta: 0.1
+  timestep:
+    sampling: logit_normal
+    logit_mean: 0.0
+    logit_std: 1.0
+    shift_mode: auto
+    shift: 3.0
+  seed: 42
+  save_every: 250
+  keep_last: 4
+  save_dtype: bf16
+  save_format: kohya
+  save_state: true
+  resume_state: ''
+  comfy_lora_dir: ''
+sample:
+  enabled: true
+  every: 250
+  at_start: false
+  prompts:
+  - '[trigger], portrait photo'
+  negative_prompt: ''
+  width: 1024
+  height: 1024
+  steps: 30
+  guidance: -1.0
+  seed: 1234
