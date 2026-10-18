@@ -2,6 +2,15 @@
 
 형식: [유의적 버전](https://semver.org/lang/ko/) · 최신이 위
 
+## [0.3.1] - 2026-10-18
+### 수정
+- **배포판 실행 오류 수정**: `run.bat` 실행 시 `ModuleNotFoundError: No module named 'lora_trainer.models'`
+  - 원인: `.gitignore` 의 `models/` 가 루트의 모델 저장 폴더뿐 아니라 소스 폴더 `lora_trainer/models/` (Krea 2 · MOSS-Image 어댑터)까지 제외해 깃허브에 올라가지 않았음
+  - `.gitignore` 의 로컬 폴더 항목을 루트 전용(`/models/`, `/output/`, `/configs/`, `/user_data/` 등)으로 변경
+### 추가
+- 배포 도구: `tools/배포저장소에올리기.bat` (배포 저장소에 사용자용 파일만 커밋·푸시, 실행 시 토큰 입력)
+  - 본체 소스(`lora_trainer/**/*.py`)가 하나라도 빠지면 배포를 중단하는 검사 추가
+
 ## [0.3.0] - 2026-10-18
 ### 추가
 - **MOSS-Image 공식 가이드 형식 자동 캡션 (Ollama · Gemma 4)**

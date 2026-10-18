@@ -3,5 +3,5 @@
 지원 베이스 모델: Krea 2 (Raw/Turbo), MOSS-Image (Base/SFT)
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 APP_NAME = "LoRA Trainer"
