@@ -35,6 +35,12 @@ ComfyUI 에서 바로 쓸 수 있는 LoRA 를 학습하는 **파이썬 데스크
 
 리눅스는 `install.sh` / `run.sh` 를 사용합니다.
 
+### 업데이트
+
+`업데이트.bat` 실행 → 최신 버전과 바뀐 점을 보여주고, 바뀐 파일만 교체합니다.
+`venv`·`models`·`output`·`configs`·`user_data` 와 데이터셋은 건드리지 않으며, 직접 고친 파일은 `_backup/` 에 먼저 보관합니다.
+버전별 변경 내용은 [CHANGELOG.md](CHANGELOG.md), 깃허브 [Releases](https://github.com/promptmaster0623-rgb/LoRA_Trainer/releases) 에서 볼 수 있습니다.
+
 ## 빠른 시작
 
 1. **설정** 페이지에서 허깅페이스 토큰 입력 (Krea 2 Raw 는 게이트 모델: 허깅페이스에서 라이선스 동의 필요)
@@ -80,7 +86,7 @@ LoRA_Trainer/
 ├─ main.py              GUI 실행 (또는 --config 로 CLI 학습)
 ├─ lora_trainer/        본체 패키지 (core·data·models·network·quant·train·gui·utils)
 ├─ presets/             추천 설정 YAML
-├─ tools/               LoRA 점검 도구 (LoRA점검.bat)
+├─ tools/               업데이트 · LoRA 점검 도구 (업데이트.bat, LoRA점검.bat)
 └─ docs/                한글 문서
 ```
 

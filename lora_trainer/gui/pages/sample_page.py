@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit
 
-from ..widgets.common import Card, FormGrid, Page, dspin, hint, spin
+from ...models.samplers import SAMPLER_LABELS
+from ..widgets.common import Card, FormGrid, Page, PathEdit, combo, dspin, hint, set_combo, spin
 
 
 class SamplePage(Page):
@@ -47,12 +48,37 @@ class SamplePage(Page):
         f.row("스텝", self.steps, "Krea 2 Raw 공식 52 · MOSS 30. 미리보기는 20 정도면 충분")
         self.guidance = dspin(-1, 30, 0.5, 2)
         self.guidance.setSpecialValueText("모델 기본값")
-        f.row("CFG", self.guidance, "Krea 2 Raw 3.5 (공식 정의) · MOSS 3.0")
+        f.row("CFG", self.guidance, "Krea 2 Raw 3.5 (공식 정의 = 일반 CFG 4.5, Fizgig 와 동일) · MOSS 4.0 (ComfyUI 템플릿)")
         self.seed = spin(0, 2_147_483_647)
         f.row("시드", self.seed, "프롬프트마다 시드+순번 사용 (스텝 간 비교 가능)")
+        self.sampler = combo(SAMPLER_LABELS)
+        f.row("샘플러", self.sampler, "MOSS 는 res_multistep (ComfyUI MOSS 템플릿과 같은 결과)")
         opt.add(f)
         opt.add(hint("샘플 생성 중에는 학습이 잠시 멈춥니다. 저VRAM 에서는 스텝/크기를 줄이세요."))
         self.add(opt)
+
+        tb = Card("Krea 2 빠른 미리보기 (Turbo LoRA)",
+                  "공식 Turbo LoRA 를 미리보기에만 잠깐 덧붙여 10스텝 · CFG 1 로 생성합니다 (약 4배 빠름). "
+                  "학습 결과물에는 영향 없음. Fizgig 기본 설정과 동일.")
+        f = FormGrid()
+        self.turbo = QCheckBox("Turbo LoRA 로 미리보기 (Krea 2 에서만 동작, 처음 한 번 약 470MB 다운로드)")
+        f.row("", self.turbo)
+        self.turbo_path = PathEdit("file", filter="safetensors (*.safetensors)")
+        self.turbo_path.setPlaceholderText("비우면 Comfy-Org/Krea-2 의 krea2_turbo_lora_rank_64_bf16 자동 사용")
+        f.row("Turbo LoRA", self.turbo_path)
+        self.turbo_strength, self.turbo_steps = dspin(0.1, 1.5, 0.05, 2), spin(2, 50)
+        ts = QHBoxLayout()
+        ts.setSpacing(8)
+        ts.addWidget(QLabel("강도"))
+        ts.addWidget(self.turbo_strength)
+        ts.addSpacing(12)
+        ts.addWidget(QLabel("스텝"))
+        ts.addWidget(self.turbo_steps)
+        ts.addStretch(1)
+        f.row("설정", ts, "권장 0.7 · 10스텝 (1.0 · 8스텝은 더 빠르지만 LoRA 효과가 덜 보임)")
+        tb.add(f)
+        self.add(tb)
+        self.turbo.toggled.connect(self._turbo_toggled)
         self.every.setFixedWidth(110)
         self.w.setFixedWidth(110)
         self.h.setFixedWidth(110)
@@ -70,6 +96,17 @@ class SamplePage(Page):
         self.steps.setValue(s.steps)
         self.guidance.setValue(s.guidance)
         self.seed.setValue(s.seed)
+        set_combo(self.sampler, s.sampler)
+        self.turbo.setChecked(s.turbo)
+        self.turbo_path.setText(s.turbo_lora)
+        self.turbo_strength.setValue(s.turbo_strength)
+        self.turbo_steps.setValue(s.turbo_steps)
+        self._turbo_toggled()
+
+    def _turbo_toggled(self, *_):
+        on = self.turbo.isChecked()
+        for wdg in (self.turbo_path, self.turbo_strength, self.turbo_steps):
+            wdg.setEnabled(on)
 
     def store(self, job):
         s = job.sample
@@ -82,3 +119,8 @@ class SamplePage(Page):
         s.steps = self.steps.value()
         s.guidance = self.guidance.value()
         s.seed = self.seed.value()
+        s.sampler = self.sampler.currentData()
+        s.turbo = self.turbo.isChecked()
+        s.turbo_lora = self.turbo_path.text().strip()
+        s.turbo_strength = self.turbo_strength.value()
+        s.turbo_steps = self.turbo_steps.value()

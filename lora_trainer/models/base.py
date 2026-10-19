@@ -44,6 +44,8 @@ class ModelAdapter(ABC):
         self.log = log
         self.transformer: Optional[nn.Module] = None
         self.swapper = None
+        # 샘플링 옵션 (trainer 가 샘플 직전에 채움): sampler, turbo 등
+        self.sample_options: Dict[str, object] = {}
 
     # 경로 ---------------------------------------------------------------
     def path_or_default(self, key: str) -> str:
@@ -106,6 +108,10 @@ class ModelAdapter(ABC):
         return self.default_shift(latent_hw)
 
     def default_shift(self, latent_hw: tuple):
+        return None
+
+    def sample_train_timesteps(self, batch: int, ts_cfg: TimestepConfig, shift, generator=None):
+        """모델 고유의 학습 타임스텝 분포가 있으면 (B,) 텐서, 없으면 None (공통 샘플러 사용)."""
         return None
 
     # 샘플링 ----------------------------------------------------------------

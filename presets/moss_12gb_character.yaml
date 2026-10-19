@@ -31,8 +31,8 @@ dataset:
   bucket_step: 64
   num_workers: 0
 network:
-  rank: 16
-  alpha: 16
+  rank: 32
+  alpha: 32.0
   dropout: 0.0
   rank_dropout: 0.0
   target: attn_mlp
@@ -41,7 +41,7 @@ network:
   rs_lora: false
   init_weights: ''
 train:
-  max_steps: 2000
+  max_steps: 2500
   batch_size: 1
   grad_accum: 1
   learning_rate: 0.0001
@@ -54,6 +54,7 @@ train:
   lr_scheduler: constant
   warmup_steps: 0
   max_grad_norm: 1.0
+  ema_decay: 0.98
   loss: mse
   huber_delta: 0.1
   timestep:
@@ -62,6 +63,26 @@ train:
     logit_std: 1.0
     shift_mode: auto
     shift: 3.0
+    clean_share: 60.0
+  adaptive:
+    enabled: false
+    plateau: true
+    plateau_patience: 300
+    plateau_factor: 0.5
+    plateau_threshold: 0.01
+    min_lr_ratio: 0.1
+    divergence: true
+    spike_ratio: 3.0
+    max_recover: 3
+    recover_factor: 0.5
+    snapshot_every: 100
+    auto_clip: false
+    auto_clip_k: 3.0
+    eval_every: 100
+    eval_samples: 4
+    val_holdout: 0
+    early_stop: false
+    early_stop_patience: 5
   seed: 42
   save_every: 250
   keep_last: 4
@@ -78,9 +99,14 @@ sample:
   - '[trigger], close-up portrait photo, soft window light'
   - '[trigger] holding a sign that says "HELLO"'
   - a portrait photo of a person, soft window light
-  negative_prompt: ''
+  negative_prompt: worst quality, bad anatomy, watermark, jpeg artifact
   width: 768
   height: 768
-  steps: 20
+  steps: 30
   guidance: -1.0
   seed: 1234
+  sampler: auto
+  turbo: false
+  turbo_lora: ''
+  turbo_strength: 0.7
+  turbo_steps: 10

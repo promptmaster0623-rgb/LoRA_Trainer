@@ -2,6 +2,39 @@
 
 형식: [유의적 버전](https://semver.org/lang/ko/) · 최신이 위
 
+## [0.5.0] - 2026-10-19
+### 추가
+- **Krea 2 빠른 미리보기 (Turbo LoRA)**: 공식 `krea2_turbo_lora_rank_64_bf16` 을 샘플 생성 동안만 덧붙여 10스텝 · CFG 1 · mu 1.15 로 생성 (Fizgig 기본 0.7). 저장되는 LoRA 에는 섞이지 않음. Krea 2 프리셋은 기본 켬
+- **res_multistep 샘플러** (ComfyUI 이식, 2차 다단계): MOSS-Image 미리보기 기본값 — ComfyUI MOSS 템플릿(res_multistep · simple · shift 5 · 30스텝 · CFG 4 · SLG 22)과 같은 결과
+- 샘플 페이지: 샘플러 선택, Turbo LoRA 켜기·경로·강도·스텝
+- **배포판 업데이트**: 루트 `업데이트.bat` (+ `tools/update.py`) — 배포 저장소 최신 버전 확인 · 바뀐 점 표시 · 바뀐 파일만 교체 (모델·결과물·설정 유지, 고친 파일 백업). git/zip 설치 모두 지원
+- 버전 관리: `tools/버전올리기.bat` (patch/minor/major + CHANGELOG 새 항목), `tools/배포저장소에서다운받기.bat` (배포 상태 확인·비교)
+- 깃허브 **Releases 페이지 릴리스 노트 자동 작성** (개발 · 배포 저장소 모두, CHANGELOG 해당 버전 내용)
+- 배포 저장소 `docs/배포기록.md` 자동 누적 (버전 · 원본 커밋 · 바뀐 파일)
+- 올리기 직전 소스 백업 `_backup/업로드/v버전_dev_시각.zip` (최근 20개)
+### 변경
+- `깃허브에올리기.bat`: 새 버전이면 "배포 저장소에도 올릴까요?" 로 개발 → 배포를 이어서 진행 (`--release`)
+- `배포저장소에올리기.bat`: 토큰을 `00_DOCUMENT/release_git_token.txt` 에서 읽음 (없으면 입력)
+- MOSS-Image 프리셋: 샘플 30스텝 + 공식 네거티브 (`worst quality, bad anatomy, watermark, jpeg artifact`)
+
+## [0.4.0] - 2026-10-19
+### 수정
+- **Krea 2 VAE 로딩 오류 수정**: `FromOriginalModelMixin is currently only compatible with ...`
+  - 원인: VAE 경로를 파일(`.../Qwen-Image/vae/diffusion_pytorch_model.safetensors`)로 지정하면 diffusers `from_single_file` 을 호출했는데, Qwen-Image VAE 는 이 기능을 지원하지 않음
+  - 새 로더 `models/krea2/vae_loader.py`: 설정으로 VAE 를 직접 만들고 가중치를 넣음. 폴더 · diffusers 단일 파일 · ComfyUI `qwen_image_vae.safetensors`(Wan 형식 키, 자동 변환) 모두 지원
+### 변경 (Fizgig v8.7.0 기준 정렬)
+- **Krea 2 LoRA 대상 = DiT 의 모든 Linear 264개** (28 블록 + 텍스트 융합 4블록·프로젝터 + 입력/타임스텝/출력층). Krea 2 기본값 `all_linear`
+- Krea 2 양자화는 28개 블록의 Linear 만 (텍스트 융합부는 bf16 유지, Fizgig 와 동일)
+- Krea 2 텍스트 토큰 길이를 공식/Fizgig 와 같은 512 로 맞춤 (접미 5토큰 포함)
+- **EMA 평균 가중치 (기본 0.98)**: 학습은 원래 가중치, 체크포인트 저장 · 샘플은 최근 스텝 평균 가중치. 이어학습 상태에도 저장. 학습 설정에 `EMA 평균` 항목
+- **MOSS-Image 학습 타임스텝**: 자동 모드에서 공식 사전학습 분포(잘린 로짓-정규, 1000 격자) + **깨끗한 쪽 비율 60%** (Fizgig v8.7.0 Clean-end share)
+  - 이전 기본값(로짓-정규 + shift 3)은 sigma<0.5 스텝이 약 13% 뿐이라 얼굴·디테일 학습이 매우 느렸음 → MOSS LoRA 가 잘 학습되지 않던 원인 후보
+  - 학습 설정에 `깨끗한 쪽 비율` 항목 (0 = 모델 자체 스케줄 약 11%, 구도가 사진에 붙으면 30 권장)
+- MOSS-Image 샘플: CFG 3 → 4, 네거티브 22번 블록 스킵은 앞 절반 스텝만 (ComfyUI MOSS 템플릿 SLG 와 동일)
+- 프리셋 · 추천 설정: Krea 2 캐릭터 rank 32 · 1e-4 · 모든 Linear, 스타일 rank 16. MOSS 캐릭터 rank 32 · 1e-4, 스타일 rank 16 · 5e-5 · EMA 끔
+### 추가
+- 테스트 `tests/test_v040_fizgig.py` (단일 파일/ComfyUI VAE 로딩, 264 Linear, 깨끗한 쪽 비율, EMA), E2E 에 VAE 단일 파일 경로 회귀 테스트
+
 ## [0.3.1] - 2026-10-18
 ### 수정
 - **배포판 실행 오류 수정**: `run.bat` 실행 시 `ModuleNotFoundError: No module named 'lora_trainer.models'`

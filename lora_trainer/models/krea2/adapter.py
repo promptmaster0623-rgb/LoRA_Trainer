@@ -25,6 +25,8 @@ from ...utils.hub import find_safetensors, resolve_path
 from ..base import ModelAdapter, exp_time_shift, pil_from_decoded
 from ..hf_loading import drop_vision_tower, load_hf_model
 from .mmdit import SingleMMDiTConfig, SingleStreamDiT
+from .vae_loader import load_qwen_image_vae
+from ..samplers import run_sampler
 
 SELECT_LAYERS = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35)
 PROMPT_PREFIX = (
@@ -34,7 +36,8 @@ PROMPT_PREFIX = (
 )
 PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 PREFIX_TOKENS = 34
-MAX_TEXT_TOKENS = 512
+SUFFIX_TOKENS = 5
+MAX_TEXT_TOKENS = 512  # 접두 제거 후 (캡션 + 접미) 최대 길이 (공식/Fizgig: max_length 512)
 
 # 해상도 의존 시간 이동 (공식 sampling.py): 256px -> mu 0.5, 1280px -> mu 1.15
 MU_X1, MU_X2 = (256 // 16) ** 2, (1280 // 16) ** 2
@@ -75,6 +78,8 @@ class Krea2Adapter(ModelAdapter):
         "text_encoder": "Qwen/Qwen3-VL-4B-Instruct",
         "tokenizer": "",
         "vae": "Qwen/Qwen-Image::vae",
+        # 미리보기 전용 (학습에는 안 씀): 공식 Turbo LoRA, 인증 불필요
+        "turbo_lora": "Comfy-Org/Krea-2/loras/krea2_turbo_lora_rank_64_bf16.safetensors",
     }
     lora_presets = {
         "attn": [r"blocks\.\d+\.attn\.(wq|wk|wv|wo|gate)"],
@@ -82,12 +87,17 @@ class Krea2Adapter(ModelAdapter):
             r"blocks\.\d+\.attn\.(wq|wk|wv|wo|gate)",
             r"blocks\.\d+\.mlp\.(gate|up|down)",
         ],
+        # Fizgig 기본: DiT 의 모든 Linear 264개 (28 블록 + 텍스트 융합 4블록 + 입력/타임스텝/출력층)
         "all_linear": [
             r"blocks\.\d+\.(attn|mlp)\.\w+",
             r"txtfusion\.(layerwise|refiner)_blocks\.\d+\.(attn|mlp)\.\w+",
+            r"txtfusion\.projector",
+            r"first|tmlp\.(0|2)|txtmlp\.(1|3)|tproj\.1|last\.linear",
         ],
     }
-    quant_exclude = ["first", "tmlp.*", "tproj.*", "txtmlp.*", "txtfusion.projector", "last.*"]
+    default_lora_target = "all_linear"
+    # 양자화는 28개 블록의 Linear 만 (Fizgig 와 동일). 텍스트 융합 · 입출력층은 bf16 유지
+    quant_exclude = ["first", "tmlp.*", "tproj.*", "txtmlp.*", "txtfusion.*", "last.*"]
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -128,7 +138,7 @@ class Krea2Adapter(ModelAdapter):
         tok = self.tokenizer
         dev = next(self.text_model.parameters()).device
         suffix = tok([PROMPT_SUFFIX], return_tensors="pt")
-        inputs = tok([PROMPT_PREFIX + prompt], truncation=True, max_length=MAX_TEXT_TOKENS + PREFIX_TOKENS,
+        inputs = tok([PROMPT_PREFIX + prompt], truncation=True, max_length=MAX_TEXT_TOKENS + PREFIX_TOKENS - SUFFIX_TOKENS,
                      return_tensors="pt")
         input_ids = torch.cat([inputs["input_ids"], suffix["input_ids"]], dim=1).to(dev)
         mask = torch.cat([inputs["attention_mask"], suffix["attention_mask"]], dim=1).bool().to(dev)
@@ -156,16 +166,13 @@ class Krea2Adapter(ModelAdapter):
     # VAE
     # ------------------------------------------------------------------
     def load_vae(self) -> None:
-        from diffusers import AutoencoderKLQwenImage
-
+        # diffusers 의 from_single_file 은 Qwen-Image VAE 를 지원하지 않으므로 직접 로딩한다
+        # (폴더 / diffusers 단일 파일 / ComfyUI qwen_image_vae.safetensors 모두 가능).
         spec = self.path_or_default("vae")
         path = resolve_path(spec, self.models_dir, self.hf_token, log=self.log)
         self.log(f"Qwen-Image VAE 로딩 : {path}")
-        if os.path.isfile(path):
-            self.vae = AutoencoderKLQwenImage.from_single_file(path, torch_dtype=torch.float32)
-        else:
-            self.vae = AutoencoderKLQwenImage.from_pretrained(path, torch_dtype=torch.float32)
-        self.vae.to(self.device).eval().requires_grad_(False)
+        self.vae = load_qwen_image_vae(path, torch.float32, log=self.log)
+        self.vae.to(self.device)
         cfg = self.vae.config
         self._latent_mean = torch.tensor(cfg.latents_mean).view(1, -1, 1, 1, 1)
         self._latent_std = torch.tensor(cfg.latents_std).view(1, -1, 1, 1, 1)
@@ -249,19 +256,29 @@ class Krea2Adapter(ModelAdapter):
     def sample(self, cond, uncond, width, height, steps, guidance, seed):
         h, w = height // 8, width // 8
         gen = torch.Generator("cpu").manual_seed(seed)
-        x = torch.randn(1, self.latent_channels, h, w, generator=gen).to(self.device, self.dtype)
+        x = torch.randn(1, self.latent_channels, h, w, generator=gen).to(self.device, torch.float32)
         seq = (h // 2) * (w // 2)
-        mu = 1.15 if getattr(self, "is_turbo", False) else mu_for_seq_len(seq)
+        opts = self.sample_options
+        if opts.get("mu") is not None:
+            mu = float(opts["mu"])                      # Turbo LoRA 미리보기: 1.15 고정 (Fizgig 와 동일)
+        else:
+            mu = 1.15 if getattr(self, "is_turbo", False) else mu_for_seq_len(seq)
         ts = torch.linspace(1, 0, steps + 1)
         em = math.exp(mu)
-        ts = [em / (em + (1.0 / float(v) - 1.0)) if v > 0 else 0.0 for v in ts]
+        sigmas = torch.tensor([em / (em + (1.0 / float(v) - 1.0)) if v > 0 else 0.0 for v in ts])
         use_cfg = guidance > 0 and uncond is not None
-        for tc, tp in zip(ts[:-1], ts[1:]):
-            t = torch.full((1,), tc, device=self.device, dtype=torch.float32)
+        sampler = opts.get("sampler") or "auto"
+        if sampler == "auto":
+            sampler = "euler"                           # 공식 sampling.py
+
+        def velocity(xx, i, s):
+            t = torch.full((1,), s, device=self.device, dtype=torch.float32)
+            xb = xx.to(self.dtype)
             with torch.autocast(self.device.type, dtype=self.dtype, enabled=self.device.type == "cuda"):
-                v = self.predict(x, t, cond).float()
+                v = self.predict(xb, t, cond).float()
                 if use_cfg:
-                    vu = self.predict(x, t, uncond).float()
+                    vu = self.predict(xb, t, uncond).float()
                     v = v + guidance * (v - vu)  # 공식 정의: cond + g * (cond - uncond)
-            x = (x.float() + (tp - tc) * v).to(self.dtype)
-        return x
+            return v
+
+        return run_sampler(sampler, x, sigmas, velocity).to(self.dtype)

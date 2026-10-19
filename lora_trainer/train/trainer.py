@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import random
@@ -28,6 +29,7 @@ from ..core.events import EventSink
 from ..data.cache import BucketBatcher, FeatureCache, build_latent_cache, build_text_cache
 from ..data.dataset import apply_trigger, dataset_summary, scan_dataset
 from ..models import get_adapter_class
+from ..network.ema import LoRAEma
 from ..network.lora import LoRANetwork, build_target_filter
 from .adaptive import LR_SCALE_FILE, AdaptiveController
 from .optim import build_optimizer, build_scheduler, effective_lr, sample_timesteps, set_optimizer_mode
@@ -185,6 +187,9 @@ class Trainer:
         self.log(f"LoRA: {len(network.loras)}개 레이어, 학습 파라미터 {network.num_params() / 1e6:.2f}M")
 
         tc = job.train
+        self.ema = LoRAEma(network, tc.ema_decay)
+        if self.ema.enabled:
+            self.log(f"EMA: 저장·샘플에 가중치 평균 사용 (감쇠 {tc.ema_decay})")
         optimizer = build_optimizer(network.trainable_params(), tc, self.log)
         self.optimizer = optimizer
         self.log(f"옵티마이저: {type(optimizer).__name__} (설정 '{tc.optimizer}')")
@@ -292,7 +297,10 @@ class Trainer:
                 b = latents.shape[0]
                 noise = torch.randn(latents.shape, generator=gen).to(device)
                 shift = adapter.shift_for(tuple(latents.shape[-2:]), tc.timestep)
-                t = sample_timesteps(b, tc.timestep, shift, gen).to(device)
+                t = adapter.sample_train_timesteps(b, tc.timestep, shift, gen)
+                if t is None:
+                    t = sample_timesteps(b, tc.timestep, shift, gen)
+                t = t.to(device)
                 tt = t.view(-1, 1, 1, 1)
                 noisy = (1 - tt) * latents + tt * noise
                 target = noise - latents
@@ -321,10 +329,12 @@ class Trainer:
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
             self.step += 1
+            self.ema.update()
 
             action = adaptive.after_step(self.step, total_loss)  # 발산 복구 · 정체 감지 · 검증 · 조기 종료
             if action == "recover":
                 ema_loss = None
+                self.ema.reset()
                 continue
             if action == "stop":
                 break
@@ -374,13 +384,25 @@ class Trainer:
         adapter.transformer.eval()
         self.network.eval()
         guidance = sc.guidance if sc.guidance >= 0 else adapter.default_guidance
+        steps = sc.steps
         div = adapter.spatial_divisor
         w, h = (sc.width // div) * div, (sc.height // div) * div
         uncond = adapter.collate_text([neg_text])
+        adapter.sample_options = {"sampler": sc.sampler}
+        turbo = self._attach_turbo()
+        if turbo:
+            steps, guidance = max(1, sc.turbo_steps), 0.0      # Turbo: CFG 없이 (CFG 1)
+            adapter.sample_options["mu"] = 1.15
         latents = []
-        for i, (prompt, key) in enumerate(sample_conds):
-            cond = adapter.collate_text([cache.load_text(key)])
-            latents.append(adapter.sample(cond, uncond, w, h, sc.steps, guidance, sc.seed + i).cpu())
+        try:
+            with self._ema_weights():
+                for i, (prompt, key) in enumerate(sample_conds):
+                    cond = adapter.collate_text([cache.load_text(key)])
+                    latents.append(adapter.sample(cond, uncond, w, h, steps, guidance, sc.seed + i).cpu())
+        finally:
+            if turbo:
+                self._turbo.detach()
+            adapter.sample_options = {}
         free_memory()
         adapter.load_vae()
         out_dir = os.path.join(self.run_dir, "samples")
@@ -421,15 +443,18 @@ class Trainer:
         name = job.project.name
         fname = f"{name}.safetensors" if final else f"{name}_{tag or f'{step:06d}'}.safetensors"
         path = os.path.join(self.run_dir, fname)
-        self.network.save(path, job.train.save_format, torch_dtype(job.train.save_dtype), self._metadata())
+        with self._ema_weights():
+            self.network.save(path, job.train.save_format, torch_dtype(job.train.save_dtype), self._metadata())
+            try:  # 학습이 진행되는지 바로 알 수 있도록 (lora_up 은 0 에서 시작)
+                ups = [l.lora_up.weight.detach().float().abs().mean().item() for l in self.network.loras]
+                up_mean = sum(ups) / len(ups)
+            except Exception:
+                up_mean = None
         self.sink.emit("saved", step=step, path=path)
-        self.log(f"LoRA 저장: {path}")
-        try:  # 학습이 진행되는지 바로 알 수 있도록 (lora_up 은 0 에서 시작)
-            ups = [l.lora_up.weight.detach().float().abs().mean().item() for l in self.network.loras]
-            self.log(f"  LoRA 변화량: up 평균 |w| = {sum(ups) / len(ups):.2e}"
-                     + ("  ← 0 에 가까움: 학습이 거의 안 되는 중!" if sum(ups) / len(ups) < 1e-6 else ""))
-        except Exception:
-            pass
+        self.log(f"LoRA 저장: {path}" + (" (EMA 평균 가중치)" if self._ema_active() else ""))
+        if up_mean is not None:
+            self.log(f"  LoRA 변화량: up 평균 |w| = {up_mean:.2e}"
+                     + ("  ← 0 에 가까움: 학습이 거의 안 되는 중!" if up_mean < 1e-6 else ""))
         if job.train.comfy_lora_dir and os.path.isdir(job.train.comfy_lora_dir):
             try:
                 shutil.copy2(path, os.path.join(job.train.comfy_lora_dir, fname))
@@ -439,6 +464,41 @@ class Trainer:
         if not final and job.train.keep_last > 0:
             self._cleanup_checkpoints(name, job.train.keep_last)
         return path
+
+    def _attach_turbo(self) -> bool:
+        """Krea 2 Turbo LoRA 를 미리보기 동안만 덧붙임. 실패하면 경고 후 일반 샘플링."""
+        sc, adapter = self.job.sample, self.adapter
+        if not sc.turbo or "turbo_lora" not in adapter.defaults:
+            return False
+        try:
+            if getattr(self, "_turbo", None) is None:
+                from ..network.extra_lora import StaticLoRA
+                from ..utils.hub import resolve_path
+
+                spec = sc.turbo_lora.strip() or adapter.defaults["turbo_lora"]
+                path = resolve_path(spec, self.job.project.models_dir, self.job.project.hf_token, log=self.log)
+                self._turbo = StaticLoRA(path, adapter.dtype)
+                self.log(f"Turbo LoRA (미리보기 전용): {path}")
+            n, total = self._turbo.attach(adapter.transformer, sc.turbo_strength)
+            if n == 0:
+                self.log("[경고] Turbo LoRA 가 모델과 맞지 않습니다 (적용 0개). 일반 샘플링으로 진행합니다.")
+                return False
+            if not getattr(self, "_turbo_logged", False):
+                self._turbo_logged = True
+                self.log(f"  Turbo LoRA 적용 {n}/{total}개 모듈, 강도 {sc.turbo_strength}, {sc.turbo_steps}스텝, CFG 1")
+            return True
+        except Exception as e:  # 다운로드 실패 등
+            self.log(f"[경고] Turbo LoRA 를 쓰지 못했습니다 ({e}). 일반 샘플링으로 진행합니다.")
+            sc.turbo = False
+            return False
+
+    def _ema_active(self) -> bool:
+        ema = getattr(self, "ema", None)
+        return bool(ema is not None and ema.enabled and ema.updates > 0)
+
+    def _ema_weights(self):
+        ema = getattr(self, "ema", None)
+        return ema.swap() if ema is not None else contextlib.nullcontext()
 
     def _cleanup_checkpoints(self, name: str, keep: int) -> None:
         files = sorted(
@@ -462,6 +522,7 @@ class Trainer:
                 "scheduler": scheduler.state_dict(),
                 "rng": torch.get_rng_state(),
                 "adaptive": self.adaptive.state_dict() if self.adaptive is not None else {},
+                "ema": self.ema.state_dict() if getattr(self, "ema", None) is not None else {},
             },
             os.path.join(state_dir, "state.pt"),
         )
@@ -475,5 +536,8 @@ class Trainer:
         torch.set_rng_state(st["rng"])
         if self.adaptive is not None and st.get("adaptive"):
             self.adaptive.load_state_dict(st["adaptive"])
+        if getattr(self, "ema", None) is not None:
+            if not (st.get("ema") and self.ema.load_state_dict(st["ema"])):
+                self.ema.reset()
         self.step = int(st["step"])
         self.log(f"이어학습: 스텝 {self.step} 부터 재개")

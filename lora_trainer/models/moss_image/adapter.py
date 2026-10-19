@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Dict, List, Optional, Sequence
 
@@ -22,6 +23,7 @@ from ...quant.loader import LazyCheckpoint, load_streaming, model_tensor_keys
 from ...quant.offload import BlockSwapper
 from ...utils.hub import find_safetensors, resolve_path
 from ..base import ModelAdapter, pil_from_decoded
+from ..samplers import comfy_simple_sigmas, run_sampler
 from ..hf_loading import drop_vision_tower, load_hf_model
 from .transformer import MossImageParams, MossImageTransformer, moss_sources
 from .vae_flux2 import load_flux2_vae
@@ -30,6 +32,51 @@ MAX_TEXT_TOKENS = 4096
 SAMPLE_SHIFT = 5.0
 UNCOND_SKIP_LAYERS = (22,)
 NUM_TRAIN_TIMESTEPS = 1000
+
+# 학습 sigma 분포: 기술 보고서 부록 A.2 표 6 의 마지막 Stage 3 구간 (공개 가중치) — Fizgig moss_image/driver.py 와 동일
+#   1% 는 1000 격자 위 균등, 나머지는 S = 1 - sigmoid(Z), Z ~ N(mu, 0.95²), S <= 0.95 로 잘라 1/0.95 로 늘린 뒤 격자에 맞춤
+T_MU, T_S, T_CUTOFF, T_UNIFORM = -1.09, 0.95, 0.95, 0.01
+
+
+def _t_cdf(x: float, mu: float) -> float:
+    """P(S <= x), S = 1 - sigmoid(Z), Z ~ N(mu, T_S²)."""
+    return 1.0 - 0.5 * math.erfc(-((math.log((1 - x) / x) - mu) / T_S) / math.sqrt(2))
+
+
+def clean_share_of(mu: float) -> float:
+    """주어진 mu 에서 sigma < 0.5 에 놓이는 학습 스텝 비율 (%)."""
+    inner = _t_cdf(0.5 * T_CUTOFF, mu) / _t_cdf(T_CUTOFF, mu)
+    return 100.0 * ((1.0 - T_UNIFORM) * inner + T_UNIFORM * 0.5)
+
+
+def mu_for_clean_share(pct: float) -> float:
+    """sigma < 0.5 (깨끗한 쪽)에 pct% 의 스텝이 오도록 하는 Z 평균 (곡선 모양·폭은 그대로, 중심만 이동).
+    Fizgig v8.7.0 'Clean-end share'. 공식 mu -1.09 는 약 11%."""
+    want = (float(pct) / 100.0 - T_UNIFORM * 0.5) / (1.0 - T_UNIFORM)
+    want = min(max(want, 1e-4), 1.0 - 1e-4)
+    lo, hi = -12.0, 12.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if _t_cdf(0.5 * T_CUTOFF, mid) / _t_cdf(T_CUTOFF, mid) < want:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def sample_moss_sigmas(batch: int, mu: float = T_MU, generator=None) -> torch.Tensor:
+    """MOSS-Image 사전학습 마지막 구간의 sigma 분포에서 (B,) 샘플 (1000 격자 값)."""
+    T = NUM_TRAIN_TIMESTEPS
+    u = torch.rand(batch, 2, generator=generator, dtype=torch.float64)
+    # 균등 1%
+    uni = (torch.floor(u[:, 1] * T) + 1) / T
+    # 잘린 logit-normal: F(S) 를 (0, F(cutoff)] 에서 균등 추출 후 역변환
+    p = u[:, 1].clamp_min(1e-12) * _t_cdf(T_CUTOFF, mu)
+    z = mu + T_S * torch.special.ndtri(1.0 - p)
+    s = torch.sigmoid(-z)
+    ln = torch.clamp(torch.ceil(T * s / T_CUTOFF), 1, T) / T
+    sigma = torch.where(u[:, 0] < T_UNIFORM, uni, ln)
+    return sigma.float()
 
 
 def moss_sigmas(num_steps: int, shift: float = SAMPLE_SHIFT, total: int = NUM_TRAIN_TIMESTEPS) -> torch.Tensor:
@@ -55,7 +102,7 @@ class MossImageAdapter(ModelAdapter):
     latent_channels = 128
     spatial_divisor = 16
     block_attr = "layers"
-    default_guidance = 3.0
+    default_guidance = 4.0   # Fizgig v8.5.4~: ComfyUI MOSS 템플릿과 같은 CFG 4 (공식 레시피는 3)
     default_steps = 30
     defaults = {
         "transformer": "Comfy-Org/MOSS-Image/diffusion_models/moss_image_base_bf16.safetensors",
@@ -204,20 +251,44 @@ class MossImageAdapter(ModelAdapter):
         s = 3.0
         return lambda t: s * t / (1 + (s - 1) * t)
 
+    def sample_train_timesteps(self, batch, ts_cfg, shift, generator=None):
+        """shift_mode=auto: 공식 사전학습 분포 + 깨끗한 쪽 비율(clean_share, Fizgig v8.7.0 기본 60%).
+        logit_normal+shift3 (이전 기본값)은 sigma<0.5 가 약 13% 뿐이라 얼굴·디테일 학습이 매우 느렸다."""
+        if ts_cfg.shift_mode != "auto":
+            return None
+        pct = float(getattr(ts_cfg, "clean_share", 0.0) or 0.0)
+        mu = mu_for_clean_share(pct) if pct > 0 else T_MU
+        if getattr(self, "_logged_mu", None) != mu:
+            self._logged_mu = mu
+            self.log(f"MOSS-Image 학습 타임스텝: 공식 분포, 깨끗한 쪽(sigma<0.5) 비율 {clean_share_of(mu):.0f}% "
+                     f"(Z 평균 {mu:.2f}, 공식 -1.09 ≈ 11%)")
+        return sample_moss_sigmas(batch, mu, generator)
+
     @torch.no_grad()
     def sample(self, cond, uncond, width, height, steps, guidance, seed):
         gen = torch.Generator("cpu").manual_seed(seed)
         x = torch.randn(1, self.latent_channels, height // 16, width // 16, generator=gen,
                         dtype=torch.float32).to(self.device)
-        sigmas = moss_sigmas(steps).to(self.device)
+        sampler = (self.sample_options.get("sampler") or "auto")
+        if sampler == "auto":
+            sampler = "res_multistep"   # Fizgig v8.5.4~ / ComfyUI MOSS 템플릿
+        if sampler == "res_multistep":
+            sigmas = comfy_simple_sigmas(steps, SAMPLE_SHIFT)       # ComfyUI simple 스케줄 (shift 5)
+        else:
+            sigmas = moss_sigmas(steps)                              # 공식 스케줄러 (학습 격자에 스냅)
+        sigmas = sigmas.to(self.device)
         use_cfg = uncond is not None and guidance != 1.0 and guidance > 0
-        for i in range(len(sigmas) - 1):
-            s, sn = sigmas[i], sigmas[i + 1]
-            t = s.reshape(1)
+        n = len(sigmas) - 1
+
+        def velocity(xx, i, s):
+            t = torch.full((1,), s, device=self.device, dtype=torch.float32)
+            # 네거티브 분기의 22번 블록 스킵은 앞쪽 절반 스텝만 (ComfyUI MOSS 템플릿 SLG: start 0, end 0.5)
+            skip = UNCOND_SKIP_LAYERS if i < (n + 1) // 2 else ()
             with torch.autocast(self.device.type, dtype=self.dtype, enabled=self.device.type == "cuda"):
-                v = self.predict(x, t, cond).float()
+                v = self.predict(xx, t, cond).float()
                 if use_cfg:
-                    vu = self.predict(x, t, uncond, skip_layers=UNCOND_SKIP_LAYERS).float()
+                    vu = self.predict(xx, t, uncond, skip_layers=skip).float()
                     v = vu + guidance * (v - vu)
-            x = x + (sn - s) * v
-        return x
+            return v
+
+        return run_sampler(sampler, x, sigmas, velocity)

@@ -9,9 +9,9 @@ from ...train.optim import OPTIMIZER_GROUPS, OPTIMIZER_SPECS, SCHEDULERS, optimi
 from ..widgets.common import Card, FormGrid, Page, PathEdit, SciSpin, combo, dspin, hint, set_combo, spin
 
 TARGETS = [
-    ("attn_mlp", "어텐션 + MLP (권장 · 표현력 높음)"),
+    ("all_linear", "모든 Linear (Krea 2 권장 · Fizgig 방식 264개)"),
+    ("attn_mlp", "어텐션 + MLP (MOSS-Image 권장 · 42블록 전체)"),
     ("attn", "어텐션만 (가볍고 안정적)"),
-    ("all_linear", "모든 Linear (텍스트 융합부 포함)"),
     ("custom", "사용자 정규식"),
 ]
 
@@ -108,10 +108,14 @@ class TrainingPage(Page):
         f.row("손실 함수", self.loss)
         self.seed = spin(0, 2_147_483_647)
         f.row("시드", self.seed)
+        self.ema = dspin(0, 0.999, 0.01, 3)
+        f.row("EMA 평균", self.ema, "저장·샘플에 최근 스텝 가중치 평균 사용. 0.98 권장 (Fizgig 기본), 0 = 끔")
         opt.add(f)
         self.add(opt)
 
-        ts = Card("타임스텝 (노이즈 단계) 분포", "자동은 모델별 권장값 (Krea 2: 해상도 연동 시간이동, MOSS: shift 3)")
+        ts = Card("타임스텝 (노이즈 단계) 분포",
+                  "자동은 모델별 권장값 (Krea 2: 로짓-정규 + 해상도 연동 시간이동, "
+                  "MOSS-Image: 공식 사전학습 분포 + 깨끗한 쪽 비율)")
         f = FormGrid()
         self.ts_sampling = combo([("logit_normal", "로짓-정규 (중간 노이즈 집중, 권장)"), ("uniform", "균등")])
         f.row("샘플링", self.ts_sampling)
@@ -133,6 +137,11 @@ class TrainingPage(Page):
         sm.addWidget(QLabel("값"))
         sm.addWidget(self.shift)
         f.row("시간 이동", sm, "값이 클수록 큰 노이즈(구도·형태) 위주 학습")
+        self.clean_share = dspin(0, 95, 5, 0)
+        self.clean_share.setSuffix(" %")
+        f.row("깨끗한 쪽 비율", self.clean_share,
+              "MOSS-Image · 시간 이동 자동일 때만: 노이즈 0.5 미만(얼굴·디테일 단계)에 배정할 스텝 비율. "
+              "60 기본 (Fizgig v8.7.0, 실험값), 구도가 사진에 너무 붙으면 30 으로. 0 = 모델 자체 스케줄(약 11%)")
         ts.add(f)
         self.add(ts)
 
@@ -338,6 +347,8 @@ class TrainingPage(Page):
         self.clip.setValue(t.max_grad_norm)
         set_combo(self.loss, t.loss)
         self.seed.setValue(t.seed)
+        self.ema.setValue(t.ema_decay)
+        self.clean_share.setValue(t.timestep.clean_share)
         set_combo(self.ts_sampling, t.timestep.sampling)
         self.logit_mean.setValue(t.timestep.logit_mean)
         self.logit_std.setValue(t.timestep.logit_std)
@@ -392,6 +403,8 @@ class TrainingPage(Page):
         t.max_grad_norm = self.clip.value()
         t.loss = self.loss.currentData()
         t.seed = self.seed.value()
+        t.ema_decay = self.ema.value()
+        t.timestep.clean_share = self.clean_share.value()
         t.timestep.sampling = self.ts_sampling.currentData()
         t.timestep.logit_mean = self.logit_mean.value()
         t.timestep.logit_std = self.logit_std.value()

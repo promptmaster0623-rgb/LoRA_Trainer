@@ -358,8 +358,15 @@ def recommend(arch: str, spec: SystemSpec, stats: DatasetStats, purpose: str = "
     max_res = 768 if small_data else 1024
     if arch == "krea2" and vram < 10:
         max_res = 768
-    rank_main = 16 if purpose == "character" else 32
-    lr_main = 1e-4 if purpose == "character" else 1.5e-4
+    # Fizgig 기준: Krea 2 캐릭터 rank 32 · 1e-4 (DiT 전체 Linear), MOSS-Image 캐릭터 rank 32 · 1e-4, 스타일 rank 16
+    if arch == "krea2":
+        rank_main = 32 if purpose == "character" else 16
+        lr_main = 1e-4
+    else:
+        rank_main = 32 if purpose == "character" else 16
+        lr_main = 1e-4 if purpose == "character" else 5e-5
+    lora_target = "all_linear" if arch == "krea2" else "attn_mlp"
+    ema_decay = 0.0 if (arch == "moss_image" and purpose != "character") else 0.98
 
     order = ["none", "fp8", "nf4"]
 
@@ -392,6 +399,7 @@ def recommend(arch: str, spec: SystemSpec, stats: DatasetStats, purpose: str = "
             "gradient_checkpointing": ckpt, "resolutions": list(res), "rank": rank, "alpha": rank,
             "optimizer": opt, "learning_rate": lr, "max_steps": steps_n, "batch_size": 1, "grad_accum": 1,
             "save_every": max(100, (steps_n // 8) // 50 * 50), "sample_every": sample_every,
+            "target": lora_target, "ema_decay": ema_decay,
         }
         if sw:
             gb = sw * MODEL_SPECS[arch]["weights_gb"][q] / MODEL_SPECS[arch]["blocks"]
@@ -449,6 +457,10 @@ def apply_to_job(job, rec: Recommendation) -> None:
     d.resolutions = list(s["resolutions"])
     n.rank = int(s["rank"])
     n.alpha = float(s["alpha"])
+    if s.get("target"):
+        n.target = s["target"]
+    if "ema_decay" in s:
+        t.ema_decay = float(s["ema_decay"])
     t.optimizer = s["optimizer"]
     t.learning_rate = float(s["learning_rate"])
     t.max_steps = int(s["max_steps"])

@@ -85,6 +85,9 @@ class TimestepConfig:
     logit_std: float = 1.0
     shift_mode: str = "auto"              # auto | none | fixed | dynamic
     shift: float = 3.0                    # fixed 모드 shift 값
+    # MOSS-Image 전용 (shift_mode=auto): sigma < 0.5 (깨끗한 쪽)에 배정할 학습 스텝 비율 %.
+    # Fizgig v8.7.0 기본 60. 0 이면 모델 자체 스케줄(약 11%).
+    clean_share: float = 60.0
 
 
 @dataclass
@@ -123,6 +126,7 @@ class TrainConfig:
     lr_scheduler: str = "constant"        # constant | cosine | linear | cosine_restarts
     warmup_steps: int = 0
     max_grad_norm: float = 1.0
+    ema_decay: float = 0.98               # LoRA 가중치 EMA (저장·샘플에 사용). 0 = 끔. Fizgig 기본 0.98
     loss: str = "mse"                     # mse | huber
     huber_delta: float = 0.1
     timestep: TimestepConfig = field(default_factory=TimestepConfig)
@@ -149,6 +153,12 @@ class SampleConfig:
     steps: int = 20
     guidance: float = -1.0                # -1 = 모델 기본값
     seed: int = 1234
+    sampler: str = "auto"                 # auto | euler | res_multistep (auto: Krea 2 Euler, MOSS res_multistep)
+    # Krea 2 전용: 공식 Turbo LoRA 를 미리보기에만 덧붙여 빠르게 생성 (Fizgig 기본: 0.7, 10스텝, CFG 1, mu 1.15)
+    turbo: bool = False
+    turbo_lora: str = ""                  # 비우면 Comfy-Org/Krea-2 의 krea2_turbo_lora_rank_64_bf16 자동 다운로드
+    turbo_strength: float = 0.7
+    turbo_steps: int = 10
 
 
 @dataclass
@@ -230,6 +240,12 @@ class TrainingJob:
 
         if self.train.optimizer not in OPTIMIZER_SPECS:
             errors.append(f"알 수 없는 옵티마이저: {self.train.optimizer}")
+        if self.sample.sampler not in ("auto", "euler", "res_multistep"):
+            errors.append(f"알 수 없는 샘플러: {self.sample.sampler}")
+        if not 0.0 <= self.train.ema_decay < 1.0:
+            errors.append("EMA 감쇠값은 0 이상 1 미만이어야 합니다 (0 = 끔).")
+        if not 0.0 <= self.train.timestep.clean_share < 100.0:
+            errors.append("깨끗한 쪽 비율(clean share)은 0 이상 100 미만이어야 합니다.")
         ad = self.train.adaptive
         if ad.enabled:
             if not 0 < ad.plateau_factor < 1:
